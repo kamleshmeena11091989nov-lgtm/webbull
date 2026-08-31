@@ -1,6 +1,5 @@
 """
-Webull OpenAPI - Tick data + Level 2 (order book depth) example,
-extended with Nasdaq-100 index/futures data.
+Webull OpenAPI - Tick data + Level 2 (order book depth) example.
 
 Requires:
     pip install webull-openapi-python-sdk
@@ -24,29 +23,12 @@ Credentials:
         $env:WEBULL_REGION="us"
         $env:WEBULL_ENV="prod"
 
-Important - Nasdaq "index" data:
-    Webull's OpenAPI has no raw index category (there is no way to pull the
-    Nasdaq Composite / ^IXIC tick-by-tick). The Category enum only covers:
-    US_STOCK, US_OPTION, HK_STOCK, US_ETF, HK_ETF, CN_STOCK, US_CRYPTO,
-    US_FUTURES, US_EVENT, HK_FUTURES. The two realistic ways to track "the
-    Nasdaq" through this API are:
-      1. QQQ (Invesco Nasdaq-100 ETF) as a liquid index proxy -> Category.US_ETF
-      2. Nasdaq-100 futures (NQ / Micro NQ) -> Category.US_FUTURES
-
-Important - futures data:
-    - Level 2 / order-book-depth data for STOCKS requires an active
-      "OpenAPI Advanced Quotes" subscription (Advanced Quotes Center ->
-      OpenAPI Advanced Quotes on the developer portal).
-    - FUTURES market data requires its own, separate paid market-data
-      subscription. As of Webull's current docs this futures subscription
-      module is still "under active development" on their end, so the
-      futures calls below may return 403 even if your stock quote
-      subscription is active - that's expected, not a bug in this script.
-    - Futures symbols use Webull's own convention: "<root>main" for the
-      continuously-rolled front-month contract (e.g. "NQmain", "MNQmain"),
-      or a dated contract code (e.g. "NQZ6" for the Dec 2026 contract).
-      Use Instrument.get_futures_instrument(code="NQ", ...) if you want to
-      list all live contracts for a product instead of guessing the code.
+Important:
+    - Level 2 / order-book-depth data requires an active "OpenAPI Advanced Quotes"
+      subscription purchased separately at the Webull developer portal
+      (Advanced Quotes Center -> OpenAPI Advanced Quotes). A subscription bought
+      in the mobile app or desktop platform does NOT apply to the API.
+    - Without that subscription, depth/tick calls below will return a 403 error.
 """
 
 import os
@@ -92,16 +74,14 @@ MQTT_ENDPOINTS = {
 HTTP_HOST = HTTP_ENDPOINTS[ENV]
 MQTT_HOST = MQTT_ENDPOINTS[ENV]
 
-SYMBOLS = ["AAPL"]                 # regular stocks, change as needed
-INDEX_PROXY_SYMBOLS = ["QQQ"]      # Nasdaq-100 ETF proxy (Category.US_ETF)
-FUTURES_SYMBOLS = ["NQmain", "MNQmain"]  # E-mini / Micro E-mini Nasdaq-100 (Category.US_FUTURES)
+SYMBOLS = ["AAPL"]  # change to whatever tickers you want
 
 
-# ---- 2a. On-demand HTTP call: order book depth (Level 2) for stocks -----
+# ---- 2. On-demand HTTP call: order book depth (Level 2) -----------------
 
 def fetch_order_book_depth():
     """
-    Pulls a one-off snapshot of bid/ask depth via HTTP for regular stocks.
+    Pulls a one-off snapshot of bid/ask depth via HTTP.
     Requires the OpenAPI Advanced Quotes subscription for Level 2.
 
     Note: the depth/quotes endpoint lives under `market_data.get_quotes`,
@@ -129,84 +109,12 @@ def fetch_order_book_depth():
             print(f"[{symbol}] depth request failed: {exc}")
 
 
-# ---- 2b. On-demand HTTP call: Nasdaq-100 proxy (QQQ) snapshot -----------
-
-def fetch_nasdaq_index_proxy_snapshot():
-    """
-    Pulls a real-time snapshot for QQQ, used as a proxy for "the Nasdaq"
-    since the OpenAPI has no dedicated index category.
-    """
-    api_client = ApiClient(APP_KEY, APP_SECRET, REGION)
-    api_client.add_endpoint(REGION, HTTP_HOST)
-
-    data_client = DataClient(api_client)
-
-    for symbol in INDEX_PROXY_SYMBOLS:
-        try:
-            res = data_client.market_data.get_quotes(
-                symbol=symbol,
-                category=Category.US_ETF.name,
-                depth=10,
-            )
-            if res.status_code == 200:
-                print(f"[{symbol}] Nasdaq-100 proxy snapshot:")
-                print(res.json())
-            else:
-                print(f"[{symbol}] proxy request failed: HTTP {res.status_code} - {res.text}")
-        except Exception as exc:
-            print(f"[{symbol}] proxy request failed: {exc}")
-
-
-# ---- 2c. On-demand HTTP call: Nasdaq futures (NQ / MNQ) ------------------
-
-def fetch_nasdaq_futures_data():
-    """
-    Pulls a real-time futures snapshot and Level-2 depth for the Nasdaq-100
-    futures. Needs the separate futures market-data subscription; a 403
-    here most likely means that subscription isn't active/available yet
-    on your account, not a code problem.
-    """
-    api_client = ApiClient(APP_KEY, APP_SECRET, REGION)
-    api_client.add_endpoint(REGION, HTTP_HOST)
-
-    data_client = DataClient(api_client)
-
-    try:
-        res = data_client.futures_market_data.get_futures_snapshot(
-            symbols=FUTURES_SYMBOLS,
-            category=Category.US_FUTURES.name,
-        )
-        if res.status_code == 200:
-            print("[NQ/MNQ] futures snapshot:")
-            print(res.json())
-        else:
-            print(f"[NQ/MNQ] snapshot request failed: HTTP {res.status_code} - {res.text}")
-    except Exception as exc:
-        print(f"[NQ/MNQ] snapshot request failed: {exc}")
-
-    for symbol in FUTURES_SYMBOLS:
-        try:
-            res = data_client.futures_market_data.get_futures_depth(
-                symbol=symbol,
-                category=Category.US_FUTURES.name,
-                depth=10,
-            )
-            if res.status_code == 200:
-                print(f"[{symbol}] futures order book depth:")
-                print(res.json())
-            else:
-                print(f"[{symbol}] depth request failed: HTTP {res.status_code} - {res.text}")
-        except Exception as exc:
-            print(f"[{symbol}] depth request failed: {exc}")
-
-
 # ---- 3. Real-time streaming: tick + quote + snapshot via MQTT -----------
 
 def stream_realtime_data(duration_seconds=60):
     """
     Opens a live MQTT stream and prints tick / quote / snapshot events
-    as they arrive, for `duration_seconds`. Subscribes to stocks, the
-    Nasdaq-100 ETF proxy, and the Nasdaq-100 futures in parallel.
+    as they arrive, for `duration_seconds`.
 
     Note: DataStreamingClient does not expose a plain `connect()` you call
     yourself -- the documented entry point is `connect_and_loop_forever()`,
@@ -227,38 +135,13 @@ def stream_realtime_data(duration_seconds=60):
 
     def on_connect(client, api_client, session_id):
         print("Connected, session:", session_id)
-
-        # Regular stocks
         client.subscribe(
             SYMBOLS,
             Category.US_STOCK.name,
             [
-                SubscribeType.TICK.name,
-                SubscribeType.QUOTE.name,
-                SubscribeType.SNAPSHOT.name,
-            ],
-        )
-
-        # Nasdaq-100 proxy (QQQ)
-        client.subscribe(
-            INDEX_PROXY_SYMBOLS,
-            Category.US_ETF.name,
-            [
-                SubscribeType.TICK.name,
-                SubscribeType.QUOTE.name,
-                SubscribeType.SNAPSHOT.name,
-            ],
-        )
-
-        # Nasdaq-100 futures (NQ / MNQ) -- may fail to subscribe if the
-        # futures market-data subscription isn't active on your account.
-        client.subscribe(
-            FUTURES_SYMBOLS,
-            Category.US_FUTURES.name,
-            [
-                SubscribeType.TICK.name,
-                SubscribeType.QUOTE.name,
-                SubscribeType.SNAPSHOT.name,
+                SubscribeType.TICK.name,      # raw tick-by-tick trades
+                SubscribeType.QUOTE.name,     # best bid/ask (level 1)
+                SubscribeType.SNAPSHOT.name,  # OHLC + volume snapshot
             ],
         )
 
@@ -287,14 +170,8 @@ def stream_realtime_data(duration_seconds=60):
 
 
 if __name__ == "__main__":
-    print("=== Order book depth (Level 2 snapshot) - stocks ===")
+    print("=== Order book depth (Level 2 snapshot) ===")
     fetch_order_book_depth()
 
-    print("\n=== Nasdaq-100 proxy (QQQ) snapshot ===")
-    fetch_nasdaq_index_proxy_snapshot()
-
-    print("\n=== Nasdaq-100 futures (NQ / MNQ) snapshot + depth ===")
-    fetch_nasdaq_futures_data()
-
-    print("\n=== Real-time tick/quote/snapshot stream (stocks + QQQ + NQ/MNQ) ===")
+    print("\n=== Real-time tick/quote/snapshot stream ===")
     stream_realtime_data(duration_seconds=60)
