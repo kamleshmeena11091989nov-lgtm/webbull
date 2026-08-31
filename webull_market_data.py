@@ -33,6 +33,7 @@ Important:
 
 import os
 import sys
+import threading
 import time
 
 try:
@@ -44,6 +45,7 @@ except ImportError:
 from webull.core.client import ApiClient
 from webull.data.common.category import Category
 from webull.data.common.subscribe_type import SubscribeType
+from webull.data.data_client import DataClient
 from webull.data.data_streaming_client import DataStreamingClient
 
 # ---- 1. Load credentials from environment -------------------------------
@@ -65,8 +67,8 @@ HTTP_ENDPOINTS = {
     "sandbox": "api.sandbox.webull.com",
 }
 MQTT_ENDPOINTS = {
-    "prod": "mqtt.webull.com",
-    "sandbox": "mqtt.sandbox.webull.com",
+    "prod": "data-api.webull.com",
+    "sandbox": "data-api.sandbox.webull.com",
 }
 
 HTTP_HOST = HTTP_ENDPOINTS[ENV]
@@ -81,27 +83,28 @@ def fetch_order_book_depth():
     """
     Pulls a one-off snapshot of bid/ask depth via HTTP.
     Requires the OpenAPI Advanced Quotes subscription for Level 2.
+
+    Note: the depth/quotes endpoint lives under `market_data.get_quotes`,
+    not a separate `quote` client -- there is no `get_order_book` method
+    in the SDK.
     """
     api_client = ApiClient(APP_KEY, APP_SECRET, REGION)
     api_client.add_endpoint(REGION, HTTP_HOST)
-
-    # The exact market-data client class/method names can change between SDK
-    # versions -- check `webull.data` in your installed package if this
-    # import path doesn't match, e.g.:
-    #   from webull.data.data_client import DataClient
-    from webull.data.data_client import DataClient
 
     data_client = DataClient(api_client)
 
     for symbol in SYMBOLS:
         try:
-            resp = data_client.quote.get_order_book(
+            res = data_client.market_data.get_quotes(
                 symbol=symbol,
                 category=Category.US_STOCK.name,
-                depth=10,  # number of price levels to request
+                depth=10,  # Level 2, 10 price levels (US stocks support up to 50)
             )
-            print(f"[{symbol}] order book depth:")
-            print(resp.json() if hasattr(resp, "json") else resp)
+            if res.status_code == 200:
+                print(f"[{symbol}] order book depth:")
+                print(res.json())
+            else:
+                print(f"[{symbol}] depth request failed: HTTP {res.status_code} - {res.text}")
         except Exception as exc:
             print(f"[{symbol}] depth request failed: {exc}")
 
@@ -112,6 +115,12 @@ def stream_realtime_data(duration_seconds=60):
     """
     Opens a live MQTT stream and prints tick / quote / snapshot events
     as they arrive, for `duration_seconds`.
+
+    Note: DataStreamingClient does not expose a plain `connect()` you call
+    yourself -- the documented entry point is `connect_and_loop_forever()`,
+    which blocks the calling thread until the connection ends. To cap the
+    stream at `duration_seconds`, we schedule `disconnect()` on a background
+    timer; calling disconnect() causes connect_and_loop_forever() to return.
     """
     session_id = f"session_{int(time.time())}"
 
@@ -146,15 +155,17 @@ def stream_realtime_data(duration_seconds=60):
     streaming_client.on_subscribe_success = on_subscribe
     streaming_client.on_quotes_message = on_message
 
-    streaming_client.connect()
+    timer = threading.Timer(duration_seconds, streaming_client.disconnect)
+    timer.daemon = True
+    timer.start()
 
     print(f"Streaming for {duration_seconds}s... Ctrl+C to stop early.")
     try:
-        time.sleep(duration_seconds)
+        streaming_client.connect_and_loop_forever()
     except KeyboardInterrupt:
-        pass
+        streaming_client.disconnect()
     finally:
-        streaming_client.loop_stop()
+        timer.cancel()
         print("Stream closed.")
 
 
